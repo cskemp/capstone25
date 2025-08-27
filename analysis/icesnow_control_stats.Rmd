@@ -1,0 +1,248 @@
+---
+title: "Ice and snow analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+
+```{r libraries}
+library(dplyr)
+library(tidyverse)
+library(here)
+library(lme4)
+library(ggrepel)
+library(lattice)
+```
+
+This notebook looks at whether dictionaries for languages in cold locations tend to include more occurrences of the words "ice" and "snow". First we load dictionary data and temperature data and create the dataframes we'll use for the analyses. 
+
+```{r loaddata, include=TRUE, cache=TRUE}
+
+dict_path <- here("data", "capstone21_dictionaries.csv")  
+wordcount_path <- here("output", "dictionary_word_matrix_noun.csv")  
+env_path <- here("output", "lang_mintemp.csv")  
+
+env <- read_csv(env_path)  %>% 
+  select(-longitude, -latitude) %>%  
+  rename(gcode_data=gcode) # %>% 
+  #filter(gcode_data !="haus1257") # we drop Hausa (haus1257) because "ice" is the Hausa form for wood!
+
+dict <- read_csv(dict_path)  %>% 
+  rename(gcode_data=gcode) %>% 
+  inner_join(env, by='gcode_data') 
+
+# load word matrix 
+wordcount <- read_csv(wordcount_path,  col_types = cols(id = col_character(), 
+                                                       year_data = col_integer(), 
+                                                       title_data = col_character(), 
+                                                       langname_data = col_character(), 
+                                                       gcode_data = col_character(), 
+                                                       area_data = col_character(), 
+                                                       langfamily_data = col_character(), 
+                                                       affiliation_data = col_character(), 
+                                                       .default=col_double()))  %>% 
+  mutate(dictsize = select(., abandonment:zucchini) %>% apply(1, sum, na.rm=TRUE)) 
+
+# compute frequencies of each word across the entire set of dictionaries
+wordcount_long <- wordcount %>% 
+    select(-(year_data:latitude_data), -dictsize) 
+lastcol <- ncol(wordcount_long)
+wordcount_long <- wordcount_long %>% 
+    pivot_longer(cols=all_of(2:lastcol), names_to="word", values_to="count", values_drop_na = TRUE) %>% 
+  group_by(word) %>% 
+  summarize(count=sum(count), .groups = "drop")
+  
+lastcol <- ncol(wordcount) + ncol(env) - 1
+
+# make data frame that includes correlations between frequencies for each word and the temperature variable
+wordenvcorrs <- wordcount %>% 
+  inner_join(env, by="gcode_data") %>% 
+  summarise(across(all_of(11:lastcol), ~cor(env, .x, use="na.or.complete"))) %>% 
+  pivot_longer(everything(), names_to="word", values_to="env_corr") %>%   
+  inner_join(wordcount_long, by="word") 
+```
+
+Gather counts for ice and snow:
+
+```{r icesnowdata, include=TRUE}
+
+ice_words <- c("ice", "snow", "snowiceterms_all")
+
+ice_regex <-  paste0("^(", paste(ice_words, collapse="|"), ")$")
+  
+icesnowcount <- wordcount %>% 
+  select(id, matches(ice_regex), dictsize) %>% 
+  mutate(snowiceterms_all = rowSums(across(matches(ice_regex)), na.rm = TRUE)) %>% 
+  mutate(raw_snowicecount=snowiceterms_all) 
+
+# we'll express frequencies in terms of counts per 10000 tokens
+countunit<- 10000
+
+# d is the dataframe we'll use for our analyses
+d <- dict %>% 
+  mutate(countunit= countunit) %>% 
+  inner_join(icesnowcount, by="id") %>% 
+  mutate(across(matches(ice_regex), ~(.x * countunit/dictsize))) %>% 
+  # keep only dictionaries with more than 5000 tokens
+  filter(dictsize >= 5000)  
+         
+```
+
+## Exploratory plot
+   
+Plot the relationship between frequency of "ice" and "snow" and temperature.
+   
+```{r freqvstmp, include=TRUE}
+   
+# convert to long form for easy plotting
+plotd <- d %>% 
+  pivot_longer(cols=matches(ice_regex), names_to="word", values_to="propn") 
+
+propnplot <- plotd %>% 
+  ggplot(aes(x=env, y=propn)) +
+  geom_point() +
+  facet_wrap(~word) +
+  geom_smooth(method=lm) +
+  labs(y="counts per 10000", x="yearly minimum temperature")
+
+show(propnplot)
+```
+
+
+The plot suggests that dictionaries for languages from cold regions do tend to include more tokens of words related to "ice" and "snow." 
+
+## Comparison to controls
+
+Now look at how other words relate to temperature -- do "ice" and "snow" correlate more strongly with temperature than most other words?
+
+```{r bottomupplot, include=TRUE}
+
+egs = c("ice", "snow", "tree", "fish", "fruit", "plant", "leaves", "kind", "species",  "coconut", "break", "money", "wind",  "people", "work")
+
+bup_plot <- wordenvcorrs %>% 
+  filter(count>100 & count < 350000) %>% 
+  ggplot(aes(x=count, y=env_corr)) +
+  geom_hline(yintercept=0, color="grey") +
+  geom_point() +
+  geom_point( 
+          data = . %>% filter(word %in% c("ice", "snow")), 
+          mapping =aes(x=count, y=env_corr),  
+          color = "red",
+  ) +
+  geom_text( 
+          data = . %>% filter(word %in% egs), 
+          mapping =aes(x=count, y=env_corr, label=word),  
+          color = "red",
+          nudge_y = 0.05
+  ) 
+ 
+show(bup_plot)
+```
+
+The x-axis shows word frequency, and the y-axis shows the correlation with the temperature variable. The large correlations observed for some low frequency words are almost certainly spurious. Selected words have been labelled in red.   Some words (e.g. "tree", "fish", "fruit") are found more frequently in dictionaries of languages from warmer regions. Others like "money" and "work" show a negative correlation with temperature (just like ice and snow). Relative to the full set of nouns, the relationship between temperature and counts for "ice" and "snow" seems fairly strong but not exceptionally strong. 
+
+## Statistical analysis
+
+The analysis here uses mixed effects models. Please see Bodo Winter's two part tutorial (posted on Canvas) for an introduction to the general approach. Following the Winter tutorial we'll take a frequentist approach here -- if you'd like to run Bayesian analyses at some stage you could try the `brms` package.
+
+We'll use binomial models because the dependent variable is a proportion (counts for ice and snow out of a total of `dictsize` counts for an entire dictionary).
+
+We'll include a random effect for language to capture the idea that dictionaries for the same language are expected to have similar proportions, and a random effect for language family to capture historical relationships between languages.
+
+
+```{r mixedeffects_full, include=TRUE}
+
+# m1 is a "full model" that includes the environment variable as a predictor
+
+m1 <- glmer(cbind(raw_snowicecount, dictsize - raw_snowicecount) ~ env + (1|langfamily) + (1|langfamily:gcode_data), data = d, family = binomial, control=glmerControl(optimizer="bobyqa")) 
+
+# pull out regression coefficient for temperature
+
+beta_temp <- round(coef(summary(m1))[2,"Estimate"], 2)
+
+show(m1)
+```
+
+The negative coefficient for `env` indicates that increases in temperature tend to be associated with decreases in count proportions of "ice" and "snow".  The magnitude of the coefficient indicates that increasing temperature by 1 degree reduces the log odds of the count proportion by around `r -1 * beta_temp`.
+
+Now we run a "reduced" model that doesn't include `env` as a predictor:
+
+```{r mixedeffects_reduced, include=TRUE}
+
+m2 <- glmer(cbind(raw_snowicecount, dictsize - raw_snowicecount) ~ (1|langfamily) + (1|langfamily:gcode_data), data = d, family = binomial, control=glmerControl(optimizer="bobyqa")) 
+
+
+```
+
+Now we compare the full and reduced models using a likelihood ratio test to see if including the environment variable produces a significant improvement.
+
+```{r mixedeffects_lrt}
+a <- anova(m2, m1)
+
+# pull out p value and chi-squared statistic
+p_value <-  signif(a$"Pr(>Chisq)"[2] , digits=3)
+chi_sq <- signif(a$Chisq[2], digits=3)
+df <- a$Df[2]
+
+show(a)
+```
+The output indicates that there is a statistically significant relationship between `env` and  count proportions for "ice" and "snow"  (p-value is around `r p_value` ).
+
+Following Winter's example, here's how you might write this up
+
+*  “We used R (R Core Team, 2012) and lme4 (Bates, Maechler & Bolker, 2012) to perform a logistic mixed effects analysis of the relationship between temperature and the combined count proportion for "ice" and "snow". Because there were multiple dictionaries for some languages, we included a random effect for language. To allow for historical relationships between languages, we also included a random effect for language family.  The analysis revealed a statistically significant relationship between temperature and count proportion of "ice" and "snow" ($\beta$ = `r beta_temp`  , $\chi^2$(`r df`) = `r chi_sq `, p =  `r p_value `, where the p-value is based on a likelihood ratio test comparing the full model with temperature as a fixed effect to a reduced model without temperature. The coefficient for temperature indicates that  increasing temperature by 1 degree reduces the log odds of the combined count proportion by around `r -1 * beta_temp`.
+
+
+## Confidence intervals
+
+It's a good idea to report a confidence interval associated with the coefficient of interest (here temperature). This confidence interval can be computed using the `confint` function.
+
+```{r confint}
+
+ci <- confint(m1)
+```
+
+So the 95% confidence interval for the coefficient on temperature is [ `r round(ci[4,1], 2)`, `r round(ci[4,2], 2)`].
+
+## Statistical analysis of controls
+
+This notebook doesn't include a statistical analysis of the control words -- but please think about how that might be done.
+
+
+## Plotting random effects 
+
+Let's look at the intercepts for different language families. We'd also like to have some indication of the uncertainty about these intercepts.
+
+```{r caterpillarplot}
+
+m1 <- glmer(cbind(raw_snowicecount, dictsize - raw_snowicecount) ~ (1|langfamily) + (1|langfamily:gcode_data),  data = d, family = binomial, control=glmerControl(optimizer="bobyqa")) 
+
+dotplot(ranef(m1, condVar=TRUE))
+
+# create tibble that we can use to make plots using ggplot
+randomeffect_df <- as_tibble(ranef(m1, condVar = TRUE))
+
+# filter out all but Indo-European languages
+randomeffect_indoeuropean <- randomeffect_df %>% 
+  filter(grpvar=="langfamily:gcode_data") %>% 
+  filter(str_detect(grp, "Indo-European")) %>% 
+  mutate(grp = str_remove(grp, "Indo-European:")) 
+
+# Make the plot including Indo-European languages only
+ieplot <- randomeffect_indoeuropean %>% 
+  mutate(eb = 1.96 * condsd) %>% 
+  ggplot(aes(x=condval, y=reorder(grp, condval))) +
+  geom_vline(xintercept = 0, color = "lightgray")+
+  geom_point() +
+  geom_errorbar(aes(xmin=condval-eb, xmax=condval +eb))  +
+  ylab("language")
+
+ieplot
+
+#coeff_df <- bind_rows( coef(m3)$`langfamily:gcode_data` )
+
+```
+
