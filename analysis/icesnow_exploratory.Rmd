@@ -1,0 +1,111 @@
+---
+title: "Ice and snow analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r libraries}
+library(dplyr)
+library(tidyverse)
+library(here)
+```
+
+This notebook looks at whether dictionaries for languages in cold locations tend to include more occurrences of words related to "ice" and "snow". First we load dictionary counts and information about the temperature associated with each dictionary. 
+
+```{r loaddata, include=TRUE, cache=TRUE}
+
+wordcount_path<- here("data", "wordcount.csv")  # this file incorporates pre-processing steps used in the BILA paper -- ie stop words have already been removed
+
+dict_path <- here("data", "bila_dictionaries_withenv.csv")  
+
+wordcount <- read_csv(wordcount_path)
+dict <- read_csv(dict_path) 
+```
+
+Gather counts for relevant terms. We'll consider three groups of words: `snow_group` includes words related to snow, `ice_group` includes words related to ice, and `snowice_group` combines words from both of the first two groups.
+
+```{r icesnowdata, include=TRUE}
+
+snow_group <- c("snow", "snowball", "snowstorm", "snowfall", "snowflake", "blizzard", "snowdrift", "snowfield", "sleet")
+ice_group <- c("ice", "frost", "glacier", "iceberg")
+snowice_group <- c(snow_group, ice_group)
+
+cwd <- tibble(groups=list(
+  tibble(group="snow_group", word=snow_group),
+  tibble(group="ice_group", word=ice_group),
+  tibble(group="snowice_group", word=snowice_group)
+  ))
+
+wordgroups <- unnest(cwd, groups)
+
+all_words <- wordgroups$word
+all_groups <- unique(wordgroups$group)
+singlewords <-  str_subset(all_groups, "_group", negate=TRUE)
+
+all_regex <-  paste0("^(", paste(all_words, collapse="|"), ")$")
+  
+cases_wordcount <- wordcount %>% 
+  select(id, matches(all_regex), dictsize_data) 
+
+cases_wordcount_long <- cases_wordcount %>% 
+  pivot_longer(cols = -c(id, dictsize_data), names_to = "word", values_to = "count") %>% 
+  right_join(wordgroups, by = "word") 
+
+cases_wordcount_grouped_long <- cases_wordcount_long %>% 
+  group_by(id, dictsize_data, group) %>% 
+  summarize(
+    count = case_when(
+      any(!is.na(count)) ~ sum(count, na.rm = TRUE),
+      TRUE ~ NA_real_
+    ), .groups = "drop"
+  ) %>% 
+  ungroup()
+
+# take out dictionaries where wiktionary filter was applied. For example, Wiktionary indicates that "ice" is an inflection of a Portuguese verb meaning "to raise", so we don't want to include "ice" in the counts for Portuguese dictionaries.
+
+filtered_combos <- read_csv(here("data", "wiktionary_filtered_combinations.csv"), show_col_types = FALSE) %>%
+  filter(word %in% all_words) %>%
+  left_join(wordgroups %>% unique(), by="word") %>%
+  select(glottocode, group) %>%
+  unique()
+
+cases_wordcount <- cases_wordcount_grouped_long %>%
+  left_join(dict %>% select(id, glottocode), by="id") %>%
+  anti_join(filtered_combos, by=c("glottocode", "group")) %>%
+  select(-glottocode) %>%
+  pivot_wider(names_from = group, values_from = count) 
+
+# we'll express frequencies in terms of counts per 10000 tokens
+countunit <- 10000
+
+# d is the dataframe we'll use for our analyses
+d <- cases_wordcount %>% 
+  mutate(across(-c(id, dictsize_data), ~(.x * countunit/dictsize_data))) %>% 
+  mutate(countunit= countunit) %>% 
+  inner_join(dict, by="id") 
+```
+
+## Exploratory plot
+   
+Plot the relationship between combined frequency for the three groups ("snow", "ice", "ice and snow") and temperature.
+   
+```{r freqvstmp, include=TRUE}
+   
+# convert to long form for easy plotting
+plotd <- d %>% 
+  pivot_longer(cols=matches(c("snow_group", "ice_group", "snowice_group")), names_to="word", values_to="propn") 
+
+propnplot <- plotd %>% 
+  ggplot(aes(x=minmonth_tmp, y=propn)) +
+  geom_point() +
+  facet_wrap(~word) +
+  geom_smooth(method=lm) +
+  labs(y="counts per 10000", x="yearly minimum temperature")
+
+show(propnplot)
+```
+
+The plot suggests that dictionaries for languages from cold regions do tend to include more tokens of words related to "ice" and "snow." 
