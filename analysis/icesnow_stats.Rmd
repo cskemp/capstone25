@@ -102,7 +102,7 @@ Plot the relationship between combined frequency for the three groups ("snow", "
    
 # convert to long form for easy plotting
 plotd <- d %>% 
-  pivot_longer(cols=matches(c("snow_group", "ice_group", "snowice_group")), names_to="word", values_to="propn") 
+  pivot_longer(cols=matches(c("snow_group$", "ice_group$", "snowice_group$")), names_to="word", values_to="propn") 
 
 propnplot <- plotd %>% 
   ggplot(aes(x=minmonth_tmp, y=propn)) +
